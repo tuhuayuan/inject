@@ -1,4 +1,3 @@
-// Package inject provides utilities for mapping and injecting dependencies in various ways.
 package inject
 
 import (
@@ -6,114 +5,122 @@ import (
 	"reflect"
 )
 
-// Injector represents an interface for mapping and injecting dependencies into structs
-// and function arguments.
+// Injector 接口集合
 type Injector interface {
 	Applicator
 	Invoker
 	TypeMapper
-	// SetParent sets the parent of the injector. If the injector cannot find a
-	// dependency in its Type map it will check its parent before returning an
-	// error.
+	// 设置父级injector如果当前差找不到参数就往父级查找
 	SetParent(Injector)
 }
 
-// Applicator represents an interface for mapping dependencies to a struct.
+// Applicator 接口
 type Applicator interface {
-	// Maps dependencies in the Type map to each field in the struct
-	// that is tagged with 'inject'. Returns an error if the injection
-	// fails.
+	// 识别struct字段的元数据inject标签，尝试注入对应的字段值, 如果参数interface{}值
+	// 不是struct或者struct指针则引发panic，类型注入失败返回错误
 	Apply(interface{}) error
 }
 
-// Invoker represents an interface for calling functions via reflection.
+// Invoker 接口
 type Invoker interface {
-	// Invoke attempts to call the interface{} provided as a function,
-	// providing dependencies for function arguments based on Type. Returns
-	// a slice of reflect.Value representing the returned values of the function.
-	// Returns an error if the injection fails.
+	// 尝试满足interface{}方法参数并且调用方法，如果interface{}不是方法会引发
+	// panic，参数无法满足返回error，正确调用返回原方法的返回值的reflect.Value数组
 	Invoke(interface{}) ([]reflect.Value, error)
 }
 
-// TypeMapper represents an interface for mapping interface{} values based on type.
+// TypeMapper 注入管理接口
 type TypeMapper interface {
-	// Maps the interface{} value based on its immediate type from reflect.TypeOf.
+	// 把参数interface{}按照reflect.TypeOf返回的类型映射
 	Map(interface{}) TypeMapper
-	// Maps the interface{} value based on the pointer of an Interface provided.
-	// This is really only useful for mapping a value as an interface, as interfaces
-	// cannot at this time be referenced directly without a pointer.
+	// 把参数1的interface{}映射到参数2的interface{}的接口类型
+	// 参数2必须是一个接口指针例如 (*http.ResponseWriter)(nil), 如果按照Map(interface{})的
+	// 方式映射的类型就是http.response结构而且不是http.ResponseWriter接口
 	MapTo(interface{}, interface{}) TypeMapper
-	// Provides a possibility to directly insert a mapping based on type and value.
-	// This makes it possible to directly map type arguments not possible to instantiate
-	// with reflect like unidirectional channels.
+	// 直接设置制定类型映射值
 	Set(reflect.Type, reflect.Value) TypeMapper
-	// Returns the Value that is mapped to the current type. Returns a zeroed Value if
-	// the Type has not been mapped.
+	// 返回指定类型映射的值，或者返回一个零值可以用v.isValid()检测
 	Get(reflect.Type) reflect.Value
 }
 
+// injector 内部结构体
 type injector struct {
 	values map[reflect.Type]reflect.Value
 	parent Injector
 }
 
-// InterfaceOf dereferences a pointer to an Interface type.
-// It panics if value is not an pointer to an interface.
+// InterfaceOf 获取一个接口类型通过 (*http.ResponseWriter)(nil) 的方式
 func InterfaceOf(value interface{}) reflect.Type {
 	t := reflect.TypeOf(value)
 
 	for t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
-
 	if t.Kind() != reflect.Interface {
 		panic("Called inject.InterfaceOf with a value that is not a pointer to an interface. (*MyInterface)(nil)")
 	}
-
 	return t
 }
 
-// New returns a new Injector.
+// CheckError 检查Invoke反射函数返回的error内容
+func CheckError(refvs []reflect.Value) error {
+	for _, v := range refvs {
+		if v.IsValid() {
+			vi := v.Interface()
+			switch vi.(type) {
+			case error:
+				return vi.(error)
+			}
+		}
+	}
+	return nil
+}
+
+// IsFunction 检查参数是否是方法
+func IsFunction(f interface{}) bool {
+	v := reflect.ValueOf(f)
+	if v.Kind() != reflect.Func {
+		return false
+	}
+	return true
+}
+
+// New 创建一个Injector对象
 func New() Injector {
 	return &injector{
 		values: make(map[reflect.Type]reflect.Value),
 	}
 }
 
-// Invoke attempts to call the interface{} provided as a function,
-// providing dependencies for function arguments based on Type.
-// Returns a slice of reflect.Value representing the returned values of the function.
-// Returns an error if the injection fails.
-// It panics if f is not a function
+// Invoke 实现Invoker接口
 func (inj *injector) Invoke(f interface{}) ([]reflect.Value, error) {
+	if !IsFunction(f) {
+		panic("f is not kine of reflect.Func")
+	}
 	t := reflect.TypeOf(f)
+	var in = make([]reflect.Value, t.NumIn())
 
-	var in = make([]reflect.Value, t.NumIn()) //Panic if t is not kind of Func
 	for i := 0; i < t.NumIn(); i++ {
 		argType := t.In(i)
 		val := inj.Get(argType)
+
 		if !val.IsValid() {
 			return nil, fmt.Errorf("Value not found for type %v", argType)
 		}
 
 		in[i] = val
 	}
-
 	return reflect.ValueOf(f).Call(in), nil
 }
 
-// Maps dependencies in the Type map to each field in the struct
-// that is tagged with 'inject'.
-// Returns an error if the injection fails.
+// Apply 实现Applicator接口.
 func (inj *injector) Apply(val interface{}) error {
 	v := reflect.ValueOf(val)
 
 	for v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
-
 	if v.Kind() != reflect.Struct {
-		return nil // Should not panic here ?
+		panic("Value is not representing a struct")
 	}
 
 	t := v.Type()
@@ -121,67 +128,72 @@ func (inj *injector) Apply(val interface{}) error {
 	for i := 0; i < v.NumField(); i++ {
 		f := v.Field(i)
 		structField := t.Field(i)
-		if f.CanSet() && (structField.Tag == "inject" || structField.Tag.Get("inject") != "") {
-			ft := f.Type()
-			v := inj.Get(ft)
-			if !v.IsValid() {
-				return fmt.Errorf("Value not found for type %v", ft)
-			}
+		tv, found := structField.Tag.Lookup("inject")
+		if f.CanSet() {
+			if found {
+				ft := f.Type()
+				v := inj.Get(ft)
 
-			f.Set(v)
+				if !v.IsValid() && tv != "-" {
+					return fmt.Errorf("Value not found for type %v", ft)
+				}
+
+				f.Set(v)
+			}
 		}
 
 	}
-
 	return nil
 }
 
-// Maps the concrete value of val to its dynamic type using reflect.TypeOf,
-// It returns the TypeMapper registered in.
-func (i *injector) Map(val interface{}) TypeMapper {
-	i.values[reflect.TypeOf(val)] = reflect.ValueOf(val)
-	return i
+// Maps 实现TypeMapper
+func (inj *injector) Map(val interface{}) TypeMapper {
+	inj.values[reflect.TypeOf(val)] = reflect.ValueOf(val)
+	return inj
 }
 
-func (i *injector) MapTo(val interface{}, ifacePtr interface{}) TypeMapper {
-	i.values[InterfaceOf(ifacePtr)] = reflect.ValueOf(val)
-	return i
+// MapTo 实现TypeMapper
+func (inj *injector) MapTo(val interface{}, ifacePtr interface{}) TypeMapper {
+	inj.values[InterfaceOf(ifacePtr)] = reflect.ValueOf(val)
+	return inj
 }
 
-// Maps the given reflect.Type to the given reflect.Value and returns
-// the Typemapper the mapping has been registered in.
-func (i *injector) Set(typ reflect.Type, val reflect.Value) TypeMapper {
-	i.values[typ] = val
-	return i
+// Set 实现TypeMapper
+func (inj *injector) Set(typ reflect.Type, val reflect.Value) TypeMapper {
+	inj.values[typ] = val
+	return inj
 }
 
-func (i *injector) Get(t reflect.Type) reflect.Value {
-	val := i.values[t]
+// Get 实现TypeMapper
+func (inj *injector) Get(t reflect.Type) reflect.Value {
+	val := inj.values[t]
 
 	if val.IsValid() {
 		return val
 	}
 
-	// no concrete types found, try to find implementors
-	// if t is an interface
+	// 没有直接类型匹配，查找接口实现匹配
 	if t.Kind() == reflect.Interface {
-		for k, v := range i.values {
+		for k, v := range inj.values {
 			if k.Implements(t) {
+				// 这里有一个随机的情况，如果映射的两个实际类型都实现同一个几口，
+				// 可能随机返回一个值
 				val = v
 				break
 			}
 		}
 	}
 
-	// Still no type found, try to look it up on the parent
-	if !val.IsValid() && i.parent != nil {
-		val = i.parent.Get(t)
+	// 没有匹配到就直接向上查找
+	if !val.IsValid() && inj.parent != nil {
+		val = inj.parent.Get(t)
 	}
 
 	return val
 
 }
 
-func (i *injector) SetParent(parent Injector) {
-	i.parent = parent
+// SetParent 实现Injector接口
+func (inj *injector) SetParent(parent Injector) {
+	inj.parent = parent
 }

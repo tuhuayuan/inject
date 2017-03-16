@@ -1,18 +1,21 @@
-package inject_test
+package inject
 
 import (
 	"fmt"
-	"github.com/codegangsta/inject"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 type SpecialString interface {
 }
 
 type TestStruct struct {
-	Dep1 string        `inject:"t" json:"-"`
-	Dep2 SpecialString `inject`
+	Dep1 string        `inject:"required" json:"dep1"`
+	Dep2 SpecialString `inject:"-"`
+
+	// 重复Dep1类型, 无法实现应该像Dep2那样自定义一个类型
 	Dep3 string
 }
 
@@ -24,136 +27,109 @@ func (g *Greeter) String() string {
 	return "Hello, My name is" + g.Name
 }
 
-/* Test Helpers */
-func expect(t *testing.T, a interface{}, b interface{}) {
-	if a != b {
-		t.Errorf("Expected %v (type %v) - Got %v (type %v)", b, reflect.TypeOf(b), a, reflect.TypeOf(a))
-	}
-}
-
-func refute(t *testing.T, a interface{}, b interface{}) {
-	if a == b {
-		t.Errorf("Did not expect %v (type %v) - Got %v (type %v)", b, reflect.TypeOf(b), a, reflect.TypeOf(a))
-	}
-}
-
 func Test_InjectorInvoke(t *testing.T) {
-	injector := inject.New()
-	expect(t, injector == nil, false)
+	inj := New()
+	assert.NotNil(t, inj)
 
-	dep := "some dependency"
-	injector.Map(dep)
+	// 映射字符串
+	dep1 := "some dependency"
+	inj.Map(dep1)
+
+	// 映射接口
 	dep2 := "another dep"
-	injector.MapTo(dep2, (*SpecialString)(nil))
+	inj.MapTo(dep2, (*SpecialString)(nil))
+
+	// 映射有方向的通道
 	dep3 := make(chan *SpecialString)
 	dep4 := make(chan *SpecialString)
 	typRecv := reflect.ChanOf(reflect.RecvDir, reflect.TypeOf(dep3).Elem())
 	typSend := reflect.ChanOf(reflect.SendDir, reflect.TypeOf(dep4).Elem())
-	injector.Set(typRecv, reflect.ValueOf(dep3))
-	injector.Set(typSend, reflect.ValueOf(dep4))
+	inj.Set(typRecv, reflect.ValueOf(dep3))
+	inj.Set(typSend, reflect.ValueOf(dep4))
 
-	_, err := injector.Invoke(func(d1 string, d2 SpecialString, d3 <-chan *SpecialString, d4 chan<- *SpecialString) {
-		expect(t, d1, dep)
-		expect(t, d2, dep2)
-		expect(t, reflect.TypeOf(d3).Elem(), reflect.TypeOf(dep3).Elem())
-		expect(t, reflect.TypeOf(d4).Elem(), reflect.TypeOf(dep4).Elem())
-		expect(t, reflect.TypeOf(d3).ChanDir(), reflect.RecvDir)
-		expect(t, reflect.TypeOf(d4).ChanDir(), reflect.SendDir)
-	})
+	// 映射双向通道
+	dep5 := make(chan *SpecialString)
+	inj.Map(dep5)
 
-	expect(t, err, nil)
+	rvs, err := inj.Invoke(
+		func(d1 string, d2 SpecialString, d3 <-chan *SpecialString, d4 chan<- *SpecialString, d5 chan *SpecialString) {
+			assert.Equal(t, d1, dep1)
+			assert.Equal(t, d2, dep2)
+			assert.Equal(t, reflect.TypeOf(d3).Elem(), reflect.TypeOf(dep3).Elem())
+			assert.Equal(t, reflect.TypeOf(d4).Elem(), reflect.TypeOf(dep4).Elem())
+			assert.Equal(t, reflect.TypeOf(d3).ChanDir(), reflect.RecvDir)
+			assert.Equal(t, reflect.TypeOf(d4).ChanDir(), reflect.SendDir)
+		})
+	assert.NoError(t, err)
+	assert.NoError(t, CheckError(rvs))
 }
 
 func Test_InjectorInvokeReturnValues(t *testing.T) {
-	injector := inject.New()
-	expect(t, injector == nil, false)
+	inj := New()
+	assert.NotNil(t, inj)
 
-	dep := "some dependency"
-	injector.Map(dep)
-	dep2 := "another dep"
-	injector.MapTo(dep2, (*SpecialString)(nil))
-
-	result, err := injector.Invoke(func(d1 string, d2 SpecialString) string {
-		expect(t, d1, dep)
-		expect(t, d2, dep2)
-		return "Hello world"
+	rvs, err := inj.Invoke(func() (string, bool) {
+		return "test", false
 	})
 
-	expect(t, result[0].String(), "Hello world")
-	expect(t, err, nil)
+	assert.NoError(t, err)
+	assert.Len(t, rvs, 2)
+	assert.Equal(t, "test", rvs[0].String())
+	assert.Equal(t, false, rvs[1].Bool())
 }
 
 func Test_InjectorApply(t *testing.T) {
-	injector := inject.New()
+	inj := New()
+	assert.NotNil(t, inj)
 
-	injector.Map("a dep").MapTo("another dep", (*SpecialString)(nil))
+	inj.Map("dep1").MapTo("dep2", (*SpecialString)(nil))
 
-	s := TestStruct{}
-	err := injector.Apply(&s)
-	expect(t, err, nil)
+	s1 := TestStruct{}
+	err := inj.Apply(&s1)
+	assert.NoError(t, err)
 
-	expect(t, s.Dep1, "a dep")
-	expect(t, s.Dep2, "another dep")
-	expect(t, s.Dep3, "")
+	assert.Equal(t, s1.Dep1, "dep1")
+	assert.Equal(t, s1.Dep2, "dep2")
+	assert.Equal(t, s1.Dep3, "")
+
+	inj = New()
+	assert.NotNil(t, inj)
+	inj.MapTo("dep2", (*SpecialString)(nil))
+
+	s2 := TestStruct{}
+	err = inj.Apply(&s2)
+	assert.Error(t, err)
 }
 
 func Test_InterfaceOf(t *testing.T) {
-	iType := inject.InterfaceOf((*SpecialString)(nil))
-	expect(t, iType.Kind(), reflect.Interface)
+	iType := InterfaceOf((*SpecialString)(nil))
+	assert.Equal(t, iType.Kind(), reflect.Interface)
 
-	iType = inject.InterfaceOf((**SpecialString)(nil))
-	expect(t, iType.Kind(), reflect.Interface)
+	iType = InterfaceOf((**SpecialString)(nil))
+	assert.Equal(t, iType.Kind(), reflect.Interface)
 
 	// Expecting nil
 	defer func() {
 		rec := recover()
-		refute(t, rec, nil)
+		assert.NotNil(t, rec)
 	}()
-	iType = inject.InterfaceOf((*testing.T)(nil))
-}
-
-func Test_InjectorSet(t *testing.T) {
-	injector := inject.New()
-	typ := reflect.TypeOf("string")
-	typSend := reflect.ChanOf(reflect.SendDir, typ)
-	typRecv := reflect.ChanOf(reflect.RecvDir, typ)
-
-	// instantiating unidirectional channels is not possible using reflect
-	// http://golang.org/src/pkg/reflect/value.go?s=60463:60504#L2064
-	chanRecv := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, typ), 0)
-	chanSend := reflect.MakeChan(reflect.ChanOf(reflect.BothDir, typ), 0)
-
-	injector.Set(typSend, chanSend)
-	injector.Set(typRecv, chanRecv)
-
-	expect(t, injector.Get(typSend).IsValid(), true)
-	expect(t, injector.Get(typRecv).IsValid(), true)
-	expect(t, injector.Get(chanSend.Type()).IsValid(), false)
-}
-
-func Test_InjectorGet(t *testing.T) {
-	injector := inject.New()
-
-	injector.Map("some dependency")
-
-	expect(t, injector.Get(reflect.TypeOf("string")).IsValid(), true)
-	expect(t, injector.Get(reflect.TypeOf(11)).IsValid(), false)
+	iType = InterfaceOf((*testing.T)(nil))
 }
 
 func Test_InjectorSetParent(t *testing.T) {
-	injector := inject.New()
-	injector.MapTo("another dep", (*SpecialString)(nil))
+	injParent := New()
+	injParent.MapTo("another dep", (*SpecialString)(nil))
 
-	injector2 := inject.New()
-	injector2.SetParent(injector)
+	inj := New()
+	inj.SetParent(injParent)
 
-	expect(t, injector2.Get(inject.InterfaceOf((*SpecialString)(nil))).IsValid(), true)
+	assert.Equal(t, inj.Get(InterfaceOf((*SpecialString)(nil))).IsValid(), true)
 }
 
-func TestInjectImplementors(t *testing.T) {
-	injector := inject.New()
+func Test_InjectImplementors(t *testing.T) {
+	inj := New()
 	g := &Greeter{"Jeremy"}
-	injector.Map(g)
+	inj.Map(g)
 
-	expect(t, injector.Get(inject.InterfaceOf((*fmt.Stringer)(nil))).IsValid(), true)
+	assert.Equal(t, inj.Get(InterfaceOf((*fmt.Stringer)(nil))).IsValid(), true)
 }
